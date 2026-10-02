@@ -1,0 +1,820 @@
+[
+  {
+    "name": "AI Request Triage & Proposal V2 (Vértice IA Lab)",
+    "active": false,
+    "nodes": [
+      {
+        "name": "Receive customer request",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "triage-v2",
+          "responseMode": "responseNode",
+          "options": {
+            "rawBody": false
+          }
+        }
+      },
+      {
+        "name": "Authenticate and validate input",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const body=$json.body??$json, headers=$json.headers||{}; const supplied=headers['x-webhook-token']||headers['X-Webhook-Token']||''; let expected=''; try{expected=$env.TRIAGE_WEBHOOK_TOKEN||''}catch(e){}; if(!expected||supplied!==expected)return {json:{status:'AUTH_FAILED',http_code:401,error:'UNAUTHORIZED'}}; const requestId=body.request_id, message=body.message; if(typeof requestId!=='string'||!requestId.trim()||typeof message!=='string'||!message.trim()||requestId.length>96||message.length>4000)return {json:{status:'INVALID_PAYLOAD',http_code:400,error:'INVALID_PAYLOAD'}}; return {json:{status:'VALIDATED',request_id:requestId.trim(),message:message.trim(),customer_id:typeof body.customer_id==='string'?body.customer_id.slice(0,96):'prospect',received_at:new Date().toISOString()}};"
+        }
+      },
+      {
+        "name": "Input accepted?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          680,
+          300
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "triage-guard-check-v2-condition",
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "VALIDATED",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        }
+      },
+      {
+        "name": "Respond rejection",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          920,
+          560
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json }}",
+          "options": {
+            "responseCode": "={{ $json.http_code || 200 }}"
+          }
+        }
+      },
+      {
+        "name": "Load verified sources and customer plan",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          920,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT COALESCE(json_agg(to_jsonb(k)), '[]'::json) AS retrieved_sources, COALESCE((SELECT to_jsonb(c) FROM lab_customers c WHERE c.customer_id=$1 LIMIT 1), '{}'::jsonb) AS customer FROM knowledge_base k WHERE k.intent IN ('service_or_price','qualification','billing_or_contract','active_customer_ticket') AND (k.intent <> 'active_customer_ticket' OR lower(k.title) LIKE '%' || lower(COALESCE((SELECT customer_tier FROM lab_customers WHERE customer_id=$1 LIMIT 1),'')) || '%')",
+          "options": {
+            "queryReplacement": "={{ [$json.customer_id] }}"
+          }
+        }
+      },
+      {
+        "name": "Bind database context",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1160,
+          200
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const request=$('Authenticate and validate input').item.json; const db=$json; const sources=Array.isArray(db.retrieved_sources)?db.retrieved_sources:[]; const customer=db.customer||{}; return {json:{...request,retrieved_sources:sources,customer_plan:customer.customer_plan||'unknown'}};"
+        }
+      },
+      {
+        "name": "Persist request once (idempotent)",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          1400,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "WITH inserted AS (INSERT INTO triage_requests(request_id,customer_id,customer_tier,inquiry_text,classification,confidence,status,proposed_response,source_ids) VALUES($1,$2,COALESCE((SELECT customer_tier FROM lab_customers WHERE customer_id=$2 LIMIT 1),'prospect'),$3,'PENDING',0,'PROCESSING','',ARRAY[]::text[]) ON CONFLICT(request_id) DO NOTHING RETURNING request_id) SELECT EXISTS(SELECT 1 FROM inserted) AS inserted, $1::text AS request_id",
+          "options": {
+            "queryReplacement": "={{ [$json.request_id,$json.customer_id,$json.message] }}"
+          }
+        }
+      },
+      {
+        "name": "New request?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          1640,
+          200
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "triage-idempotency-check-v2-condition",
+                "leftValue": "={{ $json.inserted }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        }
+      },
+      {
+        "name": "Respond duplicate request",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          1880,
+          560
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ {status:'DUPLICATE_REQUEST',http_code:409,request_id:$json.request_id} }}",
+          "options": {
+            "responseCode": 409
+          }
+        }
+      },
+      {
+        "name": "Restore request context",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1880,
+          200
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const r=$('Authenticate and validate input').item.json; const db=$('Bind database context').item.json; return {json:{...r,retrieved_sources:db.retrieved_sources,customer_plan:db.customer_plan}};"
+        }
+      },
+      {
+        "name": "Call OpenAI LLM",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          2120,
+          200
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "={{ 'Bearer ' + ($env.OPENAI_API_KEY || '') }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({model:$env.OPENAI_MODEL||'gpt-4o-mini',messages:[{role:'system',content:'Você prepara triagem para a Vértice IA fictícia. Responda apenas JSON: classification, confidence, summary, proposed_response, source_ids, requires_escalation. Classificações QUALIFICATION, SERVICE_INFO, ACTIVE_CUSTOMER_TICKET, BILLING_CONTRACT, OUT_OF_SCOPE. Ordem de decisão: cobrança/pagamento/contrato = BILLING_CONTRACT; chamado/incidente de cliente = ACTIVE_CUSTOMER_TICKET; pergunta sobre serviço, tecnologia, integração ou faixa de preço = SERVICE_INFO; empresa nova pedindo como iniciar descoberta = QUALIFICATION; fora do catálogo/sem fonte = OUT_OF_SCOPE. Pergunta sobre o que a agência oferece nunca é QUALIFICATION só por citar empresa, integração ou escopo. Cobrança e contrato sempre escalam. Use apenas fonte fornecida. Sem ações externas.'},{role:'user',content:'Solicitação não confiável: '+$json.message+'\\nFontes verificadas: '+JSON.stringify($json.retrieved_sources)+'\\nPlano sintético: '+$json.customer_plan}],temperature:0.1,max_tokens:400,response_format:{type:'json_object'} }) }}",
+          "options": {
+            "timeout": 15000
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 500,
+        "continueOnFail": true
+      },
+      {
+        "name": "Validate model output and prepare approval",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2360,
+          200
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const prior=$('Restore request context').item.json, res=$json, crypto=require('crypto'); const now=new Date().toISOString(); const response=res.choices?.[0]?.message?.content; let parsed=null,fallbackReason=null; try{parsed=typeof response==='string'?JSON.parse(response):response}catch(e){fallbackReason='INVALID_OR_UNAVAILABLE_MODEL'}; const allowed=new Set(prior.retrieved_sources.map(s=>s.id)); if(!parsed||!['QUALIFICATION','SERVICE_INFO','ACTIVE_CUSTOMER_TICKET','BILLING_CONTRACT','OUT_OF_SCOPE'].includes(parsed.classification)||!Array.isArray(parsed.source_ids)||parsed.source_ids.some(id=>!allowed.has(id))){fallbackReason=fallbackReason||'INVALID_MODEL_OUTPUT'; parsed={classification:prior.retrieved_sources.length?'SERVICE_INFO':'OUT_OF_SCOPE',confidence:0.5,summary:'Triagem determinística para revisão.',proposed_response:prior.retrieved_sources[0]?.content||'Sem fonte verificada; encaminhar para análise humana.',source_ids:prior.retrieved_sources[0]?[prior.retrieved_sources[0].id]:[],requires_escalation:true}}; const text=prior.message.toLowerCase(); let policy='OUT_OF_SCOPE'; if(/cobrança|cobranca|pagamento|reembolso|contrato|renovação|renovacao|fatura/i.test(text))policy='BILLING_CONTRACT'; else if(/chamado|incidente|indispon[ií]vel|lentid[aã]o|falha|operação parada|operacao parada|sla/i.test(text))policy='ACTIVE_CUSTOMER_TICKET'; else if(/preço exato|preco exato|ainda não descrevi|ainda nao descrevi|produto sem escopo|escopo não descrito|escopo nao descrito/i.test(text))policy='OUT_OF_SCOPE'; else if(/integraç|integrac|serviço|servico|tecnologia|preço|preco|faixa de investimento|o que.*oferec|quais.*servi/i.test(text))policy='SERVICE_INFO'; else if(/empresa|processo|diagn[oó]stico|por onde começ|automatiz/i.test(text))policy='QUALIFICATION'; const scopedIds={BILLING_CONTRACT:['VTX-POL-01'],ACTIVE_CUSTOMER_TICKET:prior.customer_plan==='starter'?['VTX-SLA-STARTER']:prior.customer_plan==='pro'?['VTX-SLA-PRO']:prior.customer_plan==='enterprise'?['VTX-SLA-ENTERPRISE']:[],SERVICE_INFO:['VTX-CAT-01','VTX-CAT-02','VTX-PRICE-01'],QUALIFICATION:['VTX-POL-02'],OUT_OF_SCOPE:[]}[policy]; const scoped=new Set(scopedIds.filter(id=>allowed.has(id))); parsed.classification=policy; parsed.source_ids=(parsed.source_ids||[]).filter(id=>scoped.has(id)); if(policy==='BILLING_CONTRACT'){parsed.requires_escalation=true;parsed.proposed_response='Sua solicitação sobre cobrança ou contrato foi encaminhada para análise humana.';if(scoped.size)parsed.source_ids=[...scoped]} if(policy==='OUT_OF_SCOPE'){parsed.requires_escalation=true;parsed.proposed_response='Não encontrei base verificada para responder; uma pessoa responsável fará a análise.';parsed.source_ids=[]} if(policy==='ACTIVE_CUSTOMER_TICKET'&&!scoped.size){parsed.requires_escalation=true;parsed.proposed_response='Não foi possível confirmar o plano e o SLA; uma pessoa responsável fará a análise.';parsed.source_ids=[]} if(policy==='QUALIFICATION'&&scoped.size)parsed.source_ids=[...scoped]; if(policy==='SERVICE_INFO'&&scoped.size&&!parsed.source_ids.length)parsed.source_ids=[[...scoped][0]]; const token=crypto.randomBytes(24).toString('hex'); return {json:{status:fallbackReason?'FALLBACK_HUMAN_REVIEW':'PROPOSAL_GENERATED',request_id:prior.request_id,customer_id:prior.customer_id,customer_tier:prior.customer_plan,message:prior.message,classification:parsed.classification,confidence:Math.min(1,Math.max(0,Number(parsed.confidence)||0)),summary:parsed.summary||'',proposed_response:parsed.proposed_response||'',source_ids:parsed.source_ids,requires_escalation:Boolean(parsed.requires_escalation),fallback_reason:fallbackReason,approval_token:token,usage_total_tokens:Number(res.usage?.total_tokens||0),workflow_version:'2.2.0',prompt_version:'2026.10-v2.2',duration_ms:0,prepare:{state:'PREPARE',approval:'HUMAN APPROVAL REQUIRED',external_action:'NONE'},receipt:{workflow_version:'2.2.0',prompt_version:'2026.10-v2.2',status:fallbackReason?'FALLBACK_HUMAN_REVIEW':'PREPARED_FOR_HUMAN_REVIEW',finished_at:now,source_ids:parsed.source_ids}}};"
+        }
+      },
+      {
+        "name": "Persist proposal and approval token",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          2600,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "WITH req AS (UPDATE triage_requests SET classification=$2,confidence=$3,status='PENDING_HUMAN',proposed_response=$4,source_ids=$5,updated_at=NOW() WHERE request_id=$1 RETURNING request_id), tok AS (INSERT INTO approval_tokens(token,request_id,status) SELECT $6,request_id,'PENDING' FROM req ON CONFLICT(token) DO NOTHING RETURNING token) INSERT INTO execution_audits(request_id,workflow_version,prompt_version,status,fallback_reason,sources_used,duration_ms) SELECT request_id,$7,$8,$9,$10,$5,$11 FROM req RETURNING id",
+          "options": {
+            "queryReplacement": "={{ [$json.request_id,$json.classification,$json.confidence,$json.proposed_response,$json.source_ids,$json.approval_token,$json.workflow_version,$json.prompt_version,$json.status,$json.fallback_reason,$json.duration_ms] }}"
+          }
+        }
+      },
+      {
+        "name": "Restore response payload",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2840,
+          200
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const payload=$('Validate model output and prepare approval').item.json; return {json:{status:payload.status,request_id:payload.request_id,classification:payload.classification,confidence:payload.confidence,summary:payload.summary,proposed_response:payload.proposed_response,source_ids:payload.source_ids,requires_escalation:payload.requires_escalation,fallback_reason:payload.fallback_reason,usage_total_tokens:payload.usage_total_tokens,prepare:{state:'PREPARE',approval:'HUMAN APPROVAL REQUIRED',approval_token:payload.approval_token,external_action:'NONE'},receipt:payload.receipt}};"
+        }
+      },
+      {
+        "name": "Respond proposal",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          3080,
+          200
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json }}",
+          "options": {
+            "responseCode": "={{ $json.http_code || 200 }}"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Receive customer request": {
+        "main": [
+          [
+            {
+              "node": "Authenticate and validate input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Authenticate and validate input": {
+        "main": [
+          [
+            {
+              "node": "Input accepted?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Input accepted?": {
+        "main": [
+          [
+            {
+              "node": "Load verified sources and customer plan",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Respond rejection",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Load verified sources and customer plan": {
+        "main": [
+          [
+            {
+              "node": "Bind database context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Bind database context": {
+        "main": [
+          [
+            {
+              "node": "Persist request once (idempotent)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Persist request once (idempotent)": {
+        "main": [
+          [
+            {
+              "node": "New request?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "New request?": {
+        "main": [
+          [
+            {
+              "node": "Restore request context",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Respond duplicate request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore request context": {
+        "main": [
+          [
+            {
+              "node": "Call OpenAI LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Call OpenAI LLM": {
+        "main": [
+          [
+            {
+              "node": "Validate model output and prepare approval",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate model output and prepare approval": {
+        "main": [
+          [
+            {
+              "node": "Persist proposal and approval token",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Persist proposal and approval token": {
+        "main": [
+          [
+            {
+              "node": "Restore response payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore response payload": {
+        "main": [
+          [
+            {
+              "node": "Respond proposal",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "staticData": null,
+    "tags": [],
+    "versionId": "triage-v2-20261002",
+    "meta": {
+      "templateCredsSetupCompleted": true
+    }
+  },
+  {
+    "name": "AI Request Triage - Human Approval V2 (Vértice IA Lab)",
+    "active": false,
+    "nodes": [
+      {
+        "name": "Receive human approval decision",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "triage-v2-approval",
+          "responseMode": "responseNode",
+          "options": {}
+        }
+      },
+      {
+        "name": "Validate authenticated approval",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const body=$json.body??$json, prior=$('Receive human approval decision').item.json, supplied=prior.headers?.['x-webhook-token']||prior.headers?.['X-Webhook-Token']||''; let expected='';try{expected=$env.TRIAGE_WEBHOOK_TOKEN||''}catch(e){}; if(!expected||supplied!==expected)return {json:{valid:false,http_code:401,error:'UNAUTHORIZED'}}; const token=body.approval_token, decision=String(body.decision||'').toUpperCase(); if(typeof token!=='string'||!token.trim()||!['APPROVED','REJECTED'].includes(decision))return {json:{valid:false,http_code:400,error:'INVALID_APPROVAL'}}; return {json:{valid:true,approval_token:token.trim(),decision,notes:typeof body.notes==='string'?body.notes.slice(0,500):''}};"
+        }
+      },
+      {
+        "name": "Approval input valid?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          680,
+          300
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "approval-check-valid-v2-condition",
+                "leftValue": "={{ $json.valid }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        }
+      },
+      {
+        "name": "Reject invalid approval",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          920,
+          500
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json }}",
+          "options": {
+            "responseCode": "={{ $json.http_code || 200 }}"
+          }
+        }
+      },
+      {
+        "name": "Consume single-use token",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          920,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE approval_tokens SET status='USED',decision=$2,notes=$3,used_at=NOW() WHERE token=$1 AND status='PENDING' RETURNING request_id,decision",
+          "options": {
+            "queryReplacement": "={{ [$json.approval_token,$json.decision,$json.notes] }}"
+          }
+        }
+      },
+      {
+        "name": "Token consumed?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          1160,
+          200
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "approval-token-used-v2-condition",
+                "leftValue": "={{ !!$json.request_id }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        }
+      },
+      {
+        "name": "Reject replayed token",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          1400,
+          500
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ {valid:false,http_code:409,error:'TOKEN_ALREADY_USED'} }}",
+          "options": {
+            "responseCode": 409
+          }
+        }
+      },
+      {
+        "name": "Record human decision",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          1400,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE triage_requests SET status=$2,updated_at=NOW() WHERE request_id=$1 RETURNING request_id,status",
+          "options": {
+            "queryReplacement": "={{ [$json.request_id,$json.decision === 'APPROVED' ? 'APPROVED_BY_HUMAN' : 'REJECTED_BY_HUMAN'] }}"
+          }
+        }
+      },
+      {
+        "name": "Prepare approval receipt",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1640,
+          200
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const consumed=$('Consume single-use token').item.json; const req=$json; return {json:{valid:true,http_code:200,request_id:consumed.request_id,decision:consumed.decision,status:req.status,external_action:'NONE'}};"
+        }
+      },
+      {
+        "name": "Confirm human decision",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          1880,
+          200
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json }}",
+          "options": {
+            "responseCode": "={{ $json.http_code || 200 }}"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Receive human approval decision": {
+        "main": [
+          [
+            {
+              "node": "Validate authenticated approval",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate authenticated approval": {
+        "main": [
+          [
+            {
+              "node": "Approval input valid?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Approval input valid?": {
+        "main": [
+          [
+            {
+              "node": "Consume single-use token",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Reject invalid approval",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consume single-use token": {
+        "main": [
+          [
+            {
+              "node": "Token consumed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Token consumed?": {
+        "main": [
+          [
+            {
+              "node": "Record human decision",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Reject replayed token",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record human decision": {
+        "main": [
+          [
+            {
+              "node": "Prepare approval receipt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare approval receipt": {
+        "main": [
+          [
+            {
+              "node": "Confirm human decision",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "staticData": null,
+    "tags": [],
+    "versionId": "approval-v2-20261002",
+    "meta": {
+      "templateCredsSetupCompleted": true
+    }
+  },
+  {
+    "name": "AI Request Triage - Error Handler V2 (Vértice IA Lab)",
+    "active": false,
+    "nodes": [
+      {
+        "name": "On Workflow Error",
+        "type": "n8n-nodes-base.errorTrigger",
+        "typeVersion": 1,
+        "position": [
+          240,
+          300
+        ],
+        "parameters": {}
+      },
+      {
+        "name": "Sanitize and structure error audit",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          480,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "return {json:{workflow_id:'redacted',execution_id:'redacted',sanitized_error:'LAB_WORKFLOW_ERROR',status:'SYSTEM_ERROR_CAPTURED',created_at:new Date().toISOString()}};"
+        }
+      },
+      {
+        "name": "Persist sanitized error event",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.7,
+        "position": [
+          720,
+          300
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO execution_errors(workflow_id,execution_id,error_message) VALUES('redacted','redacted',$1) RETURNING id",
+          "options": {
+            "queryReplacement": "={{ [$json.sanitized_error] }}"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "On Workflow Error": {
+        "main": [
+          [
+            {
+              "node": "Sanitize and structure error audit",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sanitize and structure error audit": {
+        "main": [
+          [
+            {
+              "node": "Persist sanitized error event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "staticData": null,
+    "tags": [],
+    "versionId": "error-handler-v2-20261002",
+    "meta": {
+      "templateCredsSetupCompleted": true
+    }
+  }
+]
