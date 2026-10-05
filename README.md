@@ -10,6 +10,10 @@ Author: Dyllan Alves Cordeiro — [LinkedIn](https://www.linkedin.com/in/dyllanc
 [GitHub](https://github.com/dyllan-alves-cordeiro) ·
 [Portfolio](https://dyllan-cybersecurity-portfolio.vercel.app/ai-engineering)
 
+**Demo video** (Portuguese, 77 s): [youtube.com/shorts/6moxXhwyyqs](https://youtube.com/shorts/6moxXhwyyqs) — the live flow
+answering with a source, routing billing to a human, surviving a model outage with zero tokens, and refusing a reused
+approval token.
+
 ## The problem
 
 Agencies that sell AI and IT services to other companies receive the same five kinds of message all day: a new company asking
