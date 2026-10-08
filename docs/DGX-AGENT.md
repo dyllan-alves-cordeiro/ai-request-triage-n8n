@@ -1,13 +1,17 @@
-<!--
-DGX FILE HEADER
-  nivel    : L1-small
-  arquivo  : DGX-AGENT.md
-  ancora   : dgx-agent-bootstrap-pointer
-  papel    : Ponteiro local para a doutrina V2 do soberano; o bloco comum e carimbado pelo LIAM.
-  modo     : IA-read
-  governa  : marca de projeto e entrada de harness deste repo
-  fontes   : ../sovereign-system/protocols/bootstrap.md
--->
+---
+id: ai-request-triage-n8n.docs.dgx-agent-md
+role: ponteiro-local-para-a-doutrina-v2-do-soberano-o-bloco-comum-e-ca
+layer: docs
+kind: authored
+provenance: AUTHORED_MEANING
+owner: docs
+status: active
+surface: ai-request-triage-n8n
+plane: doc
+summary: "Ponteiro local para a doutrina V2 do soberano; o bloco comum e carimbado pelo LIAM."
+---
+<!-- DGX:ANCHOR: dgx-agent-bootstrap-pointer -->
+
 
 # DGX-AGENT.md — ponteiro para o Soberano V2
 
