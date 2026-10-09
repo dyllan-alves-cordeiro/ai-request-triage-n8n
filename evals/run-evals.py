@@ -6,7 +6,14 @@ from urllib import request, error
 
 ROOT=Path(__file__).resolve().parent.parent
 DATA=json.loads((Path(__file__).parent/'eval-dataset.json').read_text())
-KB=json.loads((ROOT/'synthetic-kb.json').read_text())
+# Read the same checked-in seed used by the workflow; do not maintain a second KB.
+seed=(ROOT/'db'/'seed.sql').read_text()
+row_pattern=r"\('((?:[^']|'')*)','((?:[^']|'')*)','((?:[^']|'')*)','((?:[^']|'')*)','((?:[^']|'')*)',ARRAY\["
+KB=[dict(zip(('id','kind','intent','title','content'),
+             (value.replace("''", "'") for value in row)))
+    for row in re.findall(row_pattern, seed)]
+if not KB or len({row['id'] for row in KB}) != len(KB):
+    raise SystemExit('knowledge seed could not be parsed or contains duplicate IDs')
 ALLOWED={'QUALIFICATION','SERVICE_INFO','ACTIVE_CUSTOMER_TICKET','BILLING_CONTRACT','OUT_OF_SCOPE'}
 
 def retrieve(item):
@@ -36,7 +43,7 @@ def simulated(item,sources):
       'escalation_reason':'HUMAN_REVIEW' if item['requires_escalation'] else None}
 
 def call_openai(item,sources,key,model):
-    system=(ROOT/'prompt.txt').read_text()
+    system=(ROOT/'prompt'/'prompt.txt').read_text()
     prompt=system.replace('{{inquiry}}',item['inquiry']).replace('{{sources}}',json.dumps(sources,ensure_ascii=False)).replace('{{customer}}',json.dumps({'plan':item['plan']},ensure_ascii=False))
     payload={'model':model,'messages':[{'role':'system','content':'Siga as regras do prompt e retorne somente JSON válido.'},{'role':'user','content':prompt}],
       'temperature':0.1,'max_tokens':400,'response_format':{'type':'json_object'}}

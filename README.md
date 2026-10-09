@@ -99,3 +99,15 @@ You need n8n 2.x, PostgreSQL 16 and an OpenAI API key.
    `X-Webhook-Token`.
 
 Stack: n8n (self-hosted, Docker), PostgreSQL, OpenAI API, JavaScript in Code nodes.
+
+## Reproducing the evaluation locally
+
+Run `EVAL_MODE=simulated python3 evals/run-evals.py` from the repository root.
+This offline smoke test reads the checked-in `db/seed.sql` and uses mock responses;
+it makes no provider call and does not validate the live n8n deployment or model quality.
+For a paid model run, explicitly set `EVAL_MODE=real` and `OPENAI_API_KEY`
+(and optionally `OPENAI_MODEL`); the runner reads `prompt/prompt.txt`.
+The recorded real-model results in `evals/results-2026-10-02.md` are historical.
+
+Reproduction check on 2026-10-09: 12/12 simulated cases passed after repairing
+stale references to missing root-level knowledge and prompt files.
